@@ -10,6 +10,7 @@ local sub  = string.sub
 
 local band = bit.band
 local bor  = bit.bor
+local bnot = bit.bnot
 local bxor = bit.bxor
 local lshift = bit.lshift
 local rshift = bit.rshift
@@ -105,13 +106,18 @@ function controller.Connect(serial, baud)
 end
 
 function controller.addr_crc(addr)
-	local crc = rshift(addr, 11)
+	-- CRC Table
+	local xor_table = { 0x0, 0x0, 0x0, 0x0, 0x0, 0x15, 0x1F, 0x0B, 0x16, 0x19, 0x07, 0x0E, 0x1C, 0x0D, 0x1A, 0x01 }
+	local crc = 0
 
-	for i=10,0,-1 do
-		crc = lshift(crc, 1)
-		crc = bor(crc, band(addr, (lshift(1, i))) ~= 0 and 1 or 0)
-		if band(crc, 0x0020) ~= 0 then
-			crc = bxor(crc, 0x0035)
+	addr = band(addr, bnot(0x1F))
+
+	-- Go through each bit in the address
+	for i=5,15 do
+		-- check if bit is set
+		if band(rshift(addr, i), 0x1) ~= 0 then
+			-- xor the right value into the output
+			crc = bxor(crc, xor_table[i+1])
 		end
 	end
 
@@ -138,7 +144,7 @@ function controller.data_crc(data)
 		end
 	end
 
-	return band(crc, 0x0000FF)
+	return band(crc, 0xFF)
 end
 
 function controller:do_cmd(cmdbuf, resplen)
@@ -230,14 +236,17 @@ end
 function controller:register_push_state(reg)
 	self.reg_state[reg] = self.reg_state[reg] or {}
 	local status, read = self:pak_register_read(reg)
-	if status then
-		table.insert(self.reg_state[reg], 1, read)
+	if not status then
+		return error(("failed to push register 0x%X (CRC mismatch)"):format(reg))
 	end
+	table.insert(self.reg_state[reg], 1, read)
 end
 
 function controller:register_pop_state(reg)
 	self.reg_state[reg] = self.reg_state[reg] or {}
-	assert(#self.reg_state[reg] > 0, "nothing to pop")
+	if #self.reg_state[reg] <= 0 then
+		return error("nothing to pop")
+	end
 	return self:pak_register_write(reg, table.remove(self.reg_state[reg], 1))
 end
 
@@ -480,7 +489,7 @@ function controller:dump_tpak_cart_ram(f)
 	if ram_size <= 0 then
 		-- Return pak state to what it was previously
 		self:tpak_pop_state()
-		return false, "invalid ram size"
+		return false, "invalid ram size: " .. ram_size
 	end
 
 	progress.start()
