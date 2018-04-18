@@ -43,6 +43,7 @@ local function main(args)
 	local actions = {}
 
 	local controller = n64.Connect("/dev/ttyACM0", 2000000)
+	controller:reset()
 	controller:initialize()
 
 	for i=1,#args do
@@ -88,12 +89,3 @@ local function main(args)
 	end
 end
 main(arg)
-
---[[local fake_args = {
-	[0] = "/home/jake/Developer/n64lua/n64_dump.lua",
-	[1] = "--test",
-	--[2] = "--dump-tpak-rom",
-	--[3] = "rom.gb",
-}
-
-main(fake_args)]]

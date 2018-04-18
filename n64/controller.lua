@@ -3,6 +3,12 @@ local Serial = require('periphery').Serial
 
 local progress = require("progress")
 
+function string.tohex(str)
+    return (str:gsub('.', function (c)
+        return string.format('%02X', string.byte(c))
+    end))
+end
+
 local byte = string.byte
 local char = string.char
 local rep  = string.rep
@@ -27,8 +33,8 @@ local controller = {
 		[0x05] = 65536,		-- 8 banks
 	},
 	ROM_SIZES = {
-		[0x00] = 32768,	-- 0 banks
-		[0x01] = 65536,	-- 4 banks
+		[0x00] = 32768,		-- 0 banks
+		[0x01] = 65536,		-- 4 banks
 		[0x02] = 131072,	-- 8 banks
 		[0x03] = 262144,	-- 16 banks
 		[0x04] = 524288,	-- 32 banks
@@ -265,8 +271,8 @@ end
 function controller:has_memory_pak()
 	-- From my tests, games that use a memory pak check it by writing random data to it then read it back
 
-	-- Save the original first 32 bytes of memory ram for later
-	local status, original_block = self:pak_read(0x0000)
+	-- Save the last 32 bytes of memory ram for later
+	local status, original_block = self:pak_read(0x7FE0)
 	if not status then return false end
 
 	-- Our test string we use is 0 through 31
@@ -274,15 +280,15 @@ function controller:has_memory_pak()
 	local test_write = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1A\x1B\x1C\x1D\x1E\x1F"
 
 	-- Write our test string
-	self:pak_write(0x0000, test_write)
+	self:pak_write(0x7FE0, test_write)
 
 	-- Read it back
-	local status, new_block = self:pak_read(0x0000)
+	local status, new_block = self:pak_read(0x7FE0)
 
 	-- The test string should match our read if a mempak is inserted
 	if new_block == test_write then
 		-- Restore the original save data
-		local status = self:pak_write(0x0000, original_block)
+		local status = self:pak_write(0x7FE0, original_block)
 		-- Return if we successfully wrote back the original data
 		return status
 	end
@@ -345,7 +351,7 @@ function controller:has_transfer_pak()
 		return false
 	end
 
-	-- Enable tpak
+	-- Write pak identifier
 	self:pak_register_write(0x8, 0x84)
 
 	-- Check register is equal to pak identifier
@@ -410,6 +416,11 @@ function controller:tpak_set_flag(flag, enabled)
 	return self:pak_register_write(0xB, flags)
 end
 
+function controller:tpak_get_flags()
+	local status, flags = self:pak_register_read(0xB)
+	return flags
+end
+
 function controller:tpak_has_flag(flag)
 	local status, flags = self:pak_register_read(0xB)
 	return status and band(flags, flag) ~= 0
@@ -421,11 +432,30 @@ end
 
 function controller:tpak_read(addr)
 	local rshift_14 = rshift(addr, 14)
+
 	if rshift_14 ~= self.tpak_high_bits then
 		self.tpak_high_bits = rshift_14
 		self:pak_register_write(0xA, self.tpak_high_bits)
 	end
+
 	return self:pak_read(bor(addr, 0xC000))
+end
+
+function controller:tpak_safe_read(addr)
+	-- Always check cart status
+	-- A removed cart will just return 0's without errors
+	if not self:tpak_has_flag(TPAK_HAS_CART) then
+		return false, "failed to read from cart, cart not inserted"
+	end
+
+	local status, read = self:tpak_read(addr)
+
+	if not status then
+		-- Return error on unsuccessful read
+		return false, ("failed reading from address %04X"):format(addr)
+	end
+
+	return status, read
 end
 
 function controller:tpak_write(addr, value)
@@ -437,7 +467,6 @@ function controller:tpak_write(addr, value)
 	end
 
 	local write = rep(char(value), 32)
-
 	return self:pak_write(bor(addr, 0xC000), write)
 end
 
@@ -452,15 +481,14 @@ function controller:tpak_pop_state()
 end
 
 function controller:dump_tpak_cart_ram(f)
-	-- Get state of pak before modifications
-	self:tpak_push_state()
-
 	if not self:tpak_init() then
-		-- Return pak state to what it was previously
-		self:tpak_pop_state()
 		return false, "failed to initialize transfer pak, is it inserted?"
 	end
 
+	-- Get state of pak before modifications
+	self:tpak_push_state()
+
+	-- Enable power
 	self:tpak_set_flag(TPAK_HAS_POWER, true)
 
 	if not self:tpak_has_flag(TPAK_HAS_POWER) then
@@ -486,6 +514,14 @@ function controller:dump_tpak_cart_ram(f)
 	local ram_code = byte(cart_header, 10)
 	local ram_size = controller.RAM_SIZES[ram_code] or 0
 
+	-- MBC2 (0x05/0x06) carts should have ram built in
+	-- This chip contains 512/4bit, built in, memory banks
+	-- See below for how this should be handled
+	if cart_type == 0x05 or cart_type == 0x06 then
+		-- This size isn't defined in the cart header
+		ram_size = 512
+	end
+
 	if ram_size <= 0 then
 		-- Return pak state to what it was previously
 		self:tpak_pop_state()
@@ -494,18 +530,40 @@ function controller:dump_tpak_cart_ram(f)
 
 	progress.start()
 
-	if cart_type == 0x06 then
+	if cart_type == 0x05 or cart_type == 0x06 then
+		-- MBC2 uses built in 512 4bit ram
+		-- However the save data is returned in bits, meaning
+		-- only the lower 4 bits actually contain the data we need
 		for addr=0xA000, 0xA1FF, 32 do
-			local status, read = self:tpak_read(addr)
-			f:write(read)
-			progress.print(addr+32, 4 * 512)
+			local status, read = self:tpak_safe_read(addr)
+			if not status then return status, read end
+			-- Loop through the data 2 bytes at a time
+			for i=1,#read, 2 do
+				-- Get the first byte and strip the insignificant upper 4 bits
+				local lb = band(string.byte(read, i, i), 0x0F)
+				-- Get the second byte and strip the insignificant upper 4 bits
+				local hb = band(string.byte(read, i+1, i+1), 0x0F)
+				-- Combine the two into a single byte
+				local byte = bor(lb, lshift(hb, 4))
+
+				-- Write!
+				f:write(string.char(byte))
+			end
+			progress.print(addr+32-0xA000, ram_size)
 		end
 	else
+		-- Other memory controllers are easy
 		local banks = floor(ram_size / 0x2000)
 		for i=1,banks do
-			self:tpak_write(0x4000, i-1)
+			-- Set RAM bank number
+			if not self:tpak_write(0x4000, i-1) then
+				return false, "failed to set cart RAM bank number: " .. i-1
+			end
+
+			-- Read from RAM addresses, 32 bytes at a time
 			for addr=0xA000, 0xBFFF, 32 do
-				local status, read = self:tpak_read(addr)
+				local status, read = self:tpak_safe_read(addr)
+				if not status then return status, read end
 				f:write(read)
 				progress.print((addr+32-0xA000) + ((i-1)*(0xC000-0xA000)), ram_size)
 			end
@@ -518,23 +576,24 @@ function controller:dump_tpak_cart_ram(f)
 end
 
 function controller:dump_tpak_cart_rom(f)
-	-- Get state of pak before modifications
-	self:tpak_push_state()
-
 	if not self:tpak_init() then
-		-- Return pak state to what it was previously
-		self:tpak_pop_state()
 		return false, "failed to initialize transfer pak, is it inserted?"
 	end
 
+	-- Get state of pak before modifications
+	self:tpak_push_state()
+
+	-- Enable power
 	self:tpak_set_flag(TPAK_HAS_POWER, true)
 
+	-- Check power
 	if not self:tpak_has_flag(TPAK_HAS_POWER) then
 		-- Return pak state to what it was previously
 		self:tpak_pop_state()
 		return false, "failed to enable transfer pak power"
 	end
 
+	-- Check if cart is inserted
 	if not self:tpak_has_flag(TPAK_HAS_CART) then
 		-- Return pak state to what it was previously
 		self:tpak_pop_state()
@@ -554,23 +613,34 @@ function controller:dump_tpak_cart_rom(f)
 
 	progress.start()
 
-	-- Dump first bank
+	-- Dump first bank 32 bytes at a time
 	for addr=0x0000,0x3FFF,32 do
-		local status, read = self:tpak_read(addr)
+		local status, read = self:tpak_safe_read(addr)
+		if not status then return status, read end
+
+		-- Write it to the file!
 		f:write(read)
+		-- Update progress
 		progress.print(addr+32, rom_bytes)
 	end
 
 	-- Dump remaining banks using bank switching
 	for i=1,((rom_bytes-0x4000) / 0x4000) do
-		if cart_type == 0x06 then
-			self:tpak_write(0x2000, i)
+		if cart_type == 0x05 or cart_type == 0x06 then
+			-- MBC2 seems to use 0x2100-0x3FFF for ROM bank
+			self:tpak_write(0x2100, i)
 		else
+			-- Everything else should use 0x2000-0x3FFF
 			self:tpak_write(0x2000, i)
 		end
+		-- Read ROM bank 32 bytes at a time
 		for addr=0x4000, 0x7FFF, 32 do
-			local status, read = self:tpak_read(addr)
+			local status, read = self:tpak_safe_read(addr)
+			if not status then return status, read end
+
+			-- Write it to the file!
 			f:write(read)
+			-- Update progress
 			progress.print(addr + 32 + ((i-1)*(0x8000-0x4000)), rom_bytes)
 		end
 	end
@@ -585,9 +655,17 @@ function controller:dump_memory_pak(f)
 
 	progress.start()
 
+	-- Loop through the 32Kib of RAM, 32 bytes at a time
 	for addr=0x0000,0x7FFF,32 do
+		-- Read 32 bytes at the address
 		local status, data = self:pak_read(addr)
+		if not status then
+			-- Return error on unsuccessful read
+			return false, ("failed reading from address %04X"):format(addr)
+		end
+		-- Write it to the file!
 		f:write(data)
+		-- Update progress
 		progress.print(addr + 32, 0x8000)
 	end
 
@@ -600,8 +678,16 @@ function controller:restore_memory_pak(f)
 	progress.start()
 
 	for addr=0x0000,0x7FFF,32 do
+		-- Set position in file to address
+		f:seek("set", addr) -- Not entirely necessary
+		-- Read the 32 bytes of data from our backup file
 		local data = f:read(32)
-		self:pak_write(addr, data)
+		-- Write it to the corresponding address in RAM
+		if not self:pak_write(addr, data) then
+			-- Return error on unsuccessful write
+			return false, ("failed writing to address %04X"):format(addr)
+		end
+		-- Update progress
 		progress.print(addr + 32, 0x8000)
 	end
 
