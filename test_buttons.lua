@@ -10,5 +10,5 @@ sig.signal("SIGINT", function()
 end)
 
 while running do
-	controller:get_button_pressed()
+	controller:poll_button_pressed()
 end

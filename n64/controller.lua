@@ -3,12 +3,6 @@ local Serial = require('periphery').Serial
 
 local progress = require("progress")
 
-function string.tohex(str)
-    return (str:gsub('.', function (c)
-        return string.format('%02X', string.byte(c))
-    end))
-end
-
 local byte = string.byte
 local char = string.char
 local rep  = string.rep
@@ -99,7 +93,7 @@ controller.__index = controller
 
 function controller.Connect(serial, baud)
 	local obj = {
-		serial = Serial(serial or "/dev/ttyACM0", baud or 2000000),
+		serial = Serial(serial or "/dev/ttyACM0", baud or 115200),
 		tpak_high_bits = -1,
 		reg_state = {},
 		pressed_buttons = {
@@ -153,6 +147,10 @@ function controller.data_crc(data)
 	return band(crc, 0xFF)
 end
 
+function controller:close()
+	return self.serial:close()
+end
+
 function controller:do_cmd(cmdbuf, resplen)
 	self.serial:write(char(#cmdbuf, resplen) .. cmdbuf)
 	return self.serial:read(resplen)
@@ -188,7 +186,7 @@ function controller:has_pak()
 	return status == 0x01
 end
 
-function controller:get_button_pressed()
+function controller:poll_button_pressed()
 	local data = self:get_button_status()
 
 	local status = byte(self:get_status(), 3)
@@ -699,6 +697,7 @@ function controller:test()
 	print("has_memory_pak", self:has_memory_pak())
 	print("has_rumble_pak", self:has_rumble_pak())
 	print("has_transfer_pak", self:has_transfer_pak())
+	return true
 end
 
 return controller

@@ -23,6 +23,8 @@ local function print_help(prog, arg)
 Options
 	-v, --version               Output the version number
 	-h, --help                  Show this help text
+	--serial <file>             The serial device we should use to communicate (default /dev/ttyACM0)
+	--baud <file>               The baudrate we should use to communicate (default 115200)
 	--dump-tpak-rom <file>      Dump the transfer pak cartridge rom
 	--dump-tpak-ram <file>      Dump the transfer pak save data
 	--dump-memory-pak <file>    Dump the memory pak save data
@@ -40,33 +42,44 @@ local function main(args)
 
 	local arg
 	local check_file_arg = false
+	local skip_next_arg = false
 	local actions = {}
 
-	local controller = n64.Connect("/dev/ttyACM0", 2000000)
-	controller:reset()
-	controller:initialize()
+	local serial = "/dev/ttyACM0"
+	local baud = 115200
 
 	for i=1,#args do
+		if skip_next_arg then
+			skip_next_arg = false
+			goto cont
+		end
+
 		arg = args[i]
 		if arg == "-h" or arg == "--help" then
 			print_help(prog)
 		elseif arg == "-v" or arg == "--version" then
 			print("version: " .. VERSION)
+		elseif arg == "--serial" then
+			skip_next_arg = true
+			serial = args[i+1]
+		elseif arg == "--baud" then
+			skip_next_arg = true
+			baud = tonumber(args[i+1])
 		elseif arg == "--test" then
-			controller:test()
+			table.insert(actions, {method = "test"})
 		elseif arg:sub(1,6) == "--dump" then
 			local method = dump_methods[arg:sub(8)]
 			if not method then
 				return print_help(prog, arg)
 			end
-			table.insert(actions, {func = controller[method], file=io.stdout, open="wb"})
+			table.insert(actions, {method = method, file=io.stdout, open="wb"})
 			check_file_arg = true
 		elseif arg:sub(1,9) == "--restore" then
 			local method = restore_methods[arg:sub(11)]
 			if not method then
 				return print_help(prog, arg)
 			end
-			table.insert(actions, {func = controller[method], file=io.stdin, open="rb"})
+			table.insert(actions, {method = method, file=io.stdin, open="rb"})
 			check_file_arg = true
 		elseif check_file_arg then
 			local action = actions[#actions]
@@ -79,13 +92,20 @@ local function main(args)
 		else
 			return print_help(prog, arg)
 		end
+		::cont::
 	end
 
+	local controller = n64.Connect(serial, baud)
+	controller:reset()
+	controller:initialize()
+
 	for k,action in pairs(actions) do
-		local status, err = action.func(controller, action.file)
+		local status, err = controller[action.method](controller, action.file)
 		if not status then
 			io.stderr:write(("error: %s\n"):format(err))
 		end
 	end
+
+	controller:close()
 end
 main(arg)
