@@ -1,5 +1,4 @@
 local progress = {
-	last_amount = 0,
 	start_time = 0,
 }
 
@@ -7,20 +6,15 @@ function progress.start()
 	progress.start_time = os.clock()
 end
 
-function progress.round(num, places)
-	local mult = 10 ^ (places or 0)
-	return math.floor(num * mult + 0.5) / mult
-end
-
 function progress.nice_size(size)
 	if size <= 0 then return "0" end
-	if size < 1024 then return size .. " Bytes" end
-	if size < 1024 * 1024 then return progress.round(size / 1024, 2) .. " KB" end
-	if size < 1024 * 1024 * 1024 then return progress.round(size / (1024 * 1024), 2) .. " MB" end
-	return progress.round(size / (1024 * 1024 * 1024), 2) .. " GB"
+	if size < 1024 then return string.format("%0.2f Bytes", size) end
+	if size < 1024 * 1024 then return string.format("%0.2f KB", size / 1024) end
+	if size < 1024 * 1024 * 1024 then return string.format("%0.2f MB", size / (1024 * 1024)) end
+	return string.format("%0.2f GB", size / (1024 * 1024 * 1024))
 end
 
-function progress.print(cur, max, width)
+function progress.update(cur, max, width)
 	local maxbars = width or 30
 	local perc = cur/max
 
@@ -33,11 +27,16 @@ function progress.print(cur, max, width)
 
 	local percNum = math.floor(perc * 100)
 
-	if progress.last_amount ~= cur then -- Only update when a new bar is needed
-		io.stdout:write(("%4s%% [%s>%s] (%d/%d) %s/s (%d secs) %s"):format(percNum, bars, spaces, cur, max, progress.nice_size(speed), estimate - elapsed, percNum < 100 and "\r" or "\n"))
-		io.stdout:flush()
-		progress.last_amount = cur
-	end
+	-- Clear the line
+	io.stdout:write("\27[2K")
+	-- Print status
+	io.stdout:write(("%4s%% [%s>%s] (%d/%d) %s/s (%d secs)\r"):format(percNum, bars, spaces, cur, max, progress.nice_size(speed), estimate - elapsed))
+	io.stdout:flush()
+end
+
+function progress.finish()
+	-- End the line
+	io.stdout:write("\n")
 end
 
 return progress

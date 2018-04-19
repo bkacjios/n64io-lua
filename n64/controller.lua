@@ -153,7 +153,7 @@ end
 
 function controller:do_cmd(cmdbuf, resplen)
 	self.serial:write(char(#cmdbuf, resplen) .. cmdbuf)
-	return self.serial:read(resplen)
+	return self.serial:read(resplen, 3000)
 end
 
 function controller:reset()
@@ -399,8 +399,8 @@ end
 
 -- 0xB flags
 local TPAK_HAS_POWER	= 0x01 -- The only flag we can actually control, I think..
-local TPAK_RESET		= 0x04
-local TPAK_READY		= 0x08
+local TPAK_RESET		= 0x04 -- ???
+local TPAK_READY		= 0x08 -- Should be set after given power
 local TPAK_CART_REMOVED	= 0x40 -- Set when a cart is pulled out
 local TPAK_HAS_CART		= 0x80 -- Set when a cart is inserted
 
@@ -440,11 +440,12 @@ function controller:tpak_read(addr)
 end
 
 function controller:tpak_safe_read(addr)
-	-- Always check cart status
+	-- Check cart status
 	-- A removed cart will just return 0's without errors
-	if not self:tpak_has_flag(TPAK_HAS_CART) then
+	-- Cuts down transfer speed by half...
+	--[[if not self:tpak_has_flag(TPAK_HAS_CART) then
 		return false, "failed to read from cart, cart not inserted"
-	end
+	end]]
 
 	local status, read = self:tpak_read(addr)
 
@@ -492,7 +493,7 @@ function controller:dump_tpak_cart_ram(f)
 	if not self:tpak_has_flag(TPAK_HAS_POWER) then
 		-- Return pak state to what it was previously
 		self:tpak_pop_state()
-		return false, "failed to enable transfer pak power"
+		return false, "failed to enable power to transfer pak"
 	end
 
 	if not self:tpak_has_flag(TPAK_HAS_CART) then
@@ -547,7 +548,7 @@ function controller:dump_tpak_cart_ram(f)
 				-- Write!
 				f:write(string.char(byte))
 			end
-			progress.print(addr+32-0xA000, ram_size)
+			progress.update(addr+32-0xA000, ram_size)
 		end
 	else
 		-- Other memory controllers are easy
@@ -563,10 +564,12 @@ function controller:dump_tpak_cart_ram(f)
 				local status, read = self:tpak_safe_read(addr)
 				if not status then return status, read end
 				f:write(read)
-				progress.print((addr+32-0xA000) + ((i-1)*(0xC000-0xA000)), ram_size)
+				progress.update((addr+32-0xA000) + ((i-1)*(0xC000-0xA000)), ram_size)
 			end
 		end
 	end
+
+	progress.finish()
 
 	-- Return pak state to what it was previously
 	self:tpak_pop_state()
@@ -619,8 +622,10 @@ function controller:dump_tpak_cart_rom(f)
 		-- Write it to the file!
 		f:write(read)
 		-- Update progress
-		progress.print(addr+32, rom_bytes)
+		progress.update(addr+32, rom_bytes)
 	end
+
+	progress.finish()
 
 	-- Dump remaining banks using bank switching
 	for i=1,((rom_bytes-0x4000) / 0x4000) do
@@ -639,9 +644,11 @@ function controller:dump_tpak_cart_rom(f)
 			-- Write it to the file!
 			f:write(read)
 			-- Update progress
-			progress.print(addr + 32 + ((i-1)*(0x8000-0x4000)), rom_bytes)
+			progress.update(addr + 32 + ((i-1)*(0x8000-0x4000)), rom_bytes)
 		end
 	end
+
+	progress.finish()
 
 	-- Return pak state to what it was previously
 	self:tpak_pop_state()
@@ -664,8 +671,10 @@ function controller:dump_memory_pak(f)
 		-- Write it to the file!
 		f:write(data)
 		-- Update progress
-		progress.print(addr + 32, 0x8000)
+		progress.update(addr + 32, 0x8000)
 	end
+
+	progress.finish()
 
 	return true
 end
@@ -686,16 +695,18 @@ function controller:restore_memory_pak(f)
 			return false, ("failed writing to address %04X"):format(addr)
 		end
 		-- Update progress
-		progress.print(addr + 32, 0x8000)
+		progress.update(addr + 32, 0x8000)
 	end
+
+	progress.finish()
 
 	return true
 end
 
 function controller:test()
-	print("has_pak", self:has_pak())
-	print("has_memory_pak", self:has_memory_pak())
-	print("has_rumble_pak", self:has_rumble_pak())
+	print("has_pak_inserted", self:has_pak())
+	print("has_memory_pak  ", self:has_memory_pak())
+	print("has_rumble_pak  ", self:has_rumble_pak())
 	print("has_transfer_pak", self:has_transfer_pak())
 	return true
 end

@@ -2,12 +2,14 @@
 
 local n64 = require("n64.controller")
 
-local VERSION = 0.01
+local VERSION = 0.02
 
 local dump_methods = {
 	["tpak-rom"] = "dump_tpak_cart_rom",
 	["tpak-ram"] = "dump_tpak_cart_ram",
-	["memory-pak"] = "dump_memory_pak"
+	["tpak-sav"] = "dump_tpak_cart_ram",
+	["memory-pak"] = "dump_memory_pak",
+	["mem-pak"] = "dump_memory_pak"
 }
 
 local restore_methods = {
