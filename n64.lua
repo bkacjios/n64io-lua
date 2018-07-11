@@ -48,7 +48,7 @@ local function main(args)
 	local actions = {}
 
 	local serial = "/dev/ttyACM0"
-	local baud = 115200
+	local baud = 2000000
 
 	for i=1,#args do
 		if skip_next_arg then

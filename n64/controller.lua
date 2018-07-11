@@ -267,6 +267,8 @@ function controller:pak_register_write(reg, value)
 end
 
 function controller:has_memory_pak()
+	if not self:has_pak() then return false end
+
 	-- From my tests, games that use a memory pak check it by writing random data to it then read it back
 
 	-- Save the last 32 bytes of memory ram for later
@@ -296,6 +298,8 @@ function controller:has_memory_pak()
 end
 
 function controller:has_rumble_pak()
+	if not self:has_pak() then return false end
+
 	-- Get state of pak before modifications
 	self:register_push_state(0x8)
 
@@ -332,6 +336,8 @@ function controller:has_rumble_pak()
 end
 
 function controller:has_transfer_pak()
+	if not self:has_pak() then return false end
+
 	-- Get state of pak before modifications
 	self:register_push_state(0x8)
 
@@ -465,8 +471,7 @@ function controller:tpak_write(addr, value)
 		self:pak_register_write(0xA, self.tpak_high_bits)
 	end
 
-	local write = rep(char(value), 32)
-	return self:pak_write(bor(addr, 0xC000), write)
+	return self:pak_write(bor(addr, 0xC000), type(value) == "number" and rep(char(value), 32) or value)
 end
 
 function controller:tpak_push_state()
@@ -576,6 +581,100 @@ function controller:dump_tpak_cart_ram(f)
 	return true
 end
 
+function controller:restore_tpak_cart_ram(f)
+	if not self:tpak_init() then
+		return false, "failed to initialize transfer pak, is it inserted?"
+	end
+
+	-- Get state of pak before modifications
+	self:tpak_push_state()
+
+	-- Enable power
+	self:tpak_set_flag(TPAK_HAS_POWER, true)
+
+	if not self:tpak_has_flag(TPAK_HAS_POWER) then
+		-- Return pak state to what it was previously
+		self:tpak_pop_state()
+		return false, "failed to enable power to transfer pak"
+	end
+
+	if not self:tpak_has_flag(TPAK_HAS_CART) then
+		-- Return pak state to what it was previously
+		self:tpak_pop_state()
+		return false, "transfer pak has no cartridge"
+	end
+
+	if not self:tpak_set_ram_enabled(true) then
+		-- Return pak state to what it was previously
+		self:tpak_pop_state()
+		return false, "failed to enable transfer pak ram"
+	end
+
+	local status, cart_header = self:tpak_read(0x0140)
+	local cart_type = byte(cart_header, 8)
+	local ram_code = byte(cart_header, 10)
+	local ram_size = controller.RAM_SIZES[ram_code] or 0
+
+	-- MBC2 (0x05/0x06) carts should have ram built in
+	-- This chip contains 512/4bit, built in, memory banks
+	-- See below for how this should be handled
+	if cart_type == 0x05 or cart_type == 0x06 then
+		-- This size isn't defined in the cart header
+		ram_size = 512
+	end
+
+	if ram_size <= 0 then
+		-- Return pak state to what it was previously
+		self:tpak_pop_state()
+		return false, "invalid ram size: " .. ram_size
+	end
+
+	progress.start()
+
+	if cart_type == 0x05 or cart_type == 0x06 then
+		-- MBC2 uses built in 512 4bit ram
+		-- However the save data is returned in bits, meaning
+		-- only the lower 4 bits actually contain the data we need
+		for addr=0xA000, 0xA1FF, 32 do
+			-- Read the 32 bytes of data from our backup file
+			local data = f:read(32)
+			-- Write it to the corresponding address in RAM
+			if not self:tpak_write(addr, data) then
+				-- Return error on unsuccessful write
+				return false, ("failed writing to tpak address %04X"):format(addr)
+			end
+			progress.update(addr+32-0xA000, ram_size)
+		end
+	else
+		-- Other memory controllers are easy
+		local banks = floor(ram_size / 0x2000)
+		for i=1,banks do
+			-- Set RAM bank number
+			if not self:tpak_write(0x4000, i-1) then
+				return false, "failed to set cart RAM bank number: " .. i-1
+			end
+
+			-- Read from RAM addresses, 32 bytes at a time
+			for addr=0xA000, 0xBFFF, 32 do
+				-- Read the 32 bytes of data from our backup file
+				local data = f:read(32)
+				-- Write it to the corresponding address in RAM
+				if not self:tpak_write(addr, data) then
+					-- Return error on unsuccessful write
+					return false, ("failed writing to tpak address %04X"):format(addr)
+				end
+				progress.update((addr+32-0xA000) + ((i-1)*(0xC000-0xA000)), ram_size)
+			end
+		end
+	end
+
+	progress.finish()
+
+	-- Return pak state to what it was previously
+	self:tpak_pop_state()
+	return true
+end
+
 function controller:dump_tpak_cart_rom(f)
 	if not self:tpak_init() then
 		return false, "failed to initialize transfer pak, is it inserted?"
@@ -591,7 +690,7 @@ function controller:dump_tpak_cart_rom(f)
 	if not self:tpak_has_flag(TPAK_HAS_POWER) then
 		-- Return pak state to what it was previously
 		self:tpak_pop_state()
-		return false, "failed to enable transfer pak power"
+		return false, "failed to enable power to transfer pak"
 	end
 
 	-- Check if cart is inserted
@@ -675,7 +774,6 @@ function controller:dump_memory_pak(f)
 	end
 
 	progress.finish()
-
 	return true
 end
 
@@ -686,7 +784,7 @@ function controller:restore_memory_pak(f)
 
 	for addr=0x0000,0x7FFF,32 do
 		-- Set position in file to address
-		f:seek("set", addr) -- Not entirely necessary
+		-- f:seek("set", addr) -- Not entirely necessary
 		-- Read the 32 bytes of data from our backup file
 		local data = f:read(32)
 		-- Write it to the corresponding address in RAM
@@ -699,7 +797,6 @@ function controller:restore_memory_pak(f)
 	end
 
 	progress.finish()
-
 	return true
 end
 
