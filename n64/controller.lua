@@ -152,8 +152,10 @@ function controller:close()
 end
 
 function controller:do_cmd(cmdbuf, resplen)
-	self.serial:write(char(#cmdbuf, resplen) .. cmdbuf)
-	return self.serial:read(resplen, 3000)
+	local write = char(#cmdbuf, resplen) .. cmdbuf
+	self.serial:write(write)
+	local read = self.serial:read(resplen, 3000)
+	return read
 end
 
 function controller:reset()
@@ -162,7 +164,8 @@ function controller:reset()
 end
 
 function controller:get_status()
-	return self:do_cmd("\x00", 3)
+	local status = self:do_cmd("\x00", 3)
+	return status
 end
 
 function controller:get_button_status()
@@ -175,6 +178,8 @@ function controller:initialize()
 		-- wait until pak is ready
 		status = byte(self:get_status(), 3)
 	until status ~= 0x03
+
+	return status
 end
 
 function controller:has_pak()
@@ -213,6 +218,12 @@ function controller:poll_button_pressed()
 			end
 		end
 	end
+end
+
+function string.tohex(str)
+    return (str:gsub('.', function (c)
+        return string.format('%02X ', string.byte(c))
+    end))
 end
 
 function controller:pak_read(addr)
@@ -273,6 +284,7 @@ function controller:has_memory_pak()
 
 	-- Save the last 32 bytes of memory ram for later
 	local status, original_block = self:pak_read(0x7FE0)
+
 	if not status then return false end
 
 	-- Our test string we use is 0 through 31
@@ -342,6 +354,7 @@ function controller:has_transfer_pak()
 	self:register_push_state(0x8)
 
 	self:pak_register_write(0x8, 0xFE)
+
 	local status, val = self:pak_register_read(0x8)
 
 	-- Reading from 0x8, after writing 0xFE should be 0x00
@@ -724,8 +737,6 @@ function controller:dump_tpak_cart_rom(f)
 		progress.update(addr+32, rom_bytes)
 	end
 
-	progress.finish()
-
 	-- Dump remaining banks using bank switching
 	for i=1,((rom_bytes-0x4000) / 0x4000) do
 		if cart_type == 0x05 or cart_type == 0x06 then
@@ -801,10 +812,99 @@ function controller:restore_memory_pak(f)
 end
 
 function controller:test()
-	print("has_pak_inserted", self:has_pak())
-	print("has_memory_pak  ", self:has_memory_pak())
-	print("has_rumble_pak  ", self:has_rumble_pak())
-	print("has_transfer_pak", self:has_transfer_pak())
+	io.stdout:write("reseting.. ")
+	self:reset()
+	io.stdout:write("done\r\n")
+	io.stdout:write("initializing.. ")
+	self:initialize()
+	io.stdout:write("done\r\n")
+
+	if self:has_memory_pak() then
+		print("Memory pak inserted..")
+	elseif self:has_transfer_pak() then
+		print("Transfer pak inserted..")
+
+		if not self:tpak_init() then
+			return false, "failed to initialize transfer pak, is it inserted?"
+		end
+
+		-- Get state of pak before modifications
+		self:tpak_push_state()
+
+		-- Enable power
+		self:tpak_set_flag(TPAK_HAS_POWER, true)
+
+		if not self:tpak_has_flag(TPAK_HAS_POWER) then
+			print("Failed to enable power to transfer pak..")
+		end
+		
+		-- Check if cart is inserted
+		if self:tpak_has_flag(TPAK_HAS_CART) then
+			print("\tTransfer pak game inserted..")
+			local status, cart_header = self:tpak_read(0x0120)
+
+			print(("\tName       : %s"):format(cart_header:sub(21, 21+16)))
+
+			local status, cart_header = self:tpak_read(0x0140)
+
+			local manufacture_code = cart_header:sub(1, 3)
+			local color_mode = byte(cart_header, 4)
+			local license_code_new = cart_header:sub(5, 6)
+			local sgb_mode = byte(cart_header, 7)
+			local cart_type = byte(cart_header, 8)
+			local rom_code = byte(cart_header, 9)
+			local region_code = byte(cart_header, 11)
+			local license_code = byte(cart_header, 12)
+			local version = byte(cart_header, 13)
+			local header_crc = byte(cart_header, 14)
+			local crc_high = byte(cart_header, 15)
+			local crc_low = byte(cart_header, 16)
+
+			local cart_crc = lshift(crc_low, 8) + crc_high
+
+			local rom_bytes = controller.ROM_SIZES[rom_code]
+
+			print(("\tManufacture: %s"):format(manufacture_code))
+			print(("\tRegion     : %s"):format(region_code == 0x00 and "Japan" or "International"))
+			print(("\tLicense    : %X"):format(license_code == 51 and license_code_new or license_code))
+			print(("\tVersion    : %d"):format(version))
+			print(("\tHeader CRC : %X"):format(header_crc))
+			print(("\tGlobal CRC : %X"):format(cart_crc))
+
+			local ram_code = byte(cart_header, 10)
+			local ram_size = controller.RAM_SIZES[ram_code] or 0
+
+			-- MBC2 (0x05/0x06) carts should have ram built in
+			-- This chip contains 512/4bit, built in, memory banks
+			-- See below for how this should be handled
+			if cart_type == 0x05 or cart_type == 0x06 then
+				-- This size isn't defined in the cart header
+				ram_size = 512
+			end
+
+			if color_mode == 0x80 then
+				print("\tColor      : Backwards compatible")
+			else
+				print(("\tColor      : %s"):format(color_mode == 0xC0))
+			end
+
+			print(("\tCart Type  : %s"):format(controller.CART_TYPES[cart_type] or "UNKNOWN"))
+			print(("\tROM Size   : %s"):format(progress.nice_size(rom_bytes)))
+			print(("\tRAM Size   : %s"):format(progress.nice_size(ram_size)))
+			print(("\tSuper GB   : %s"):format(sgb_mode == 0x03))
+		end
+
+		-- Return pak state to what it was previously
+		self:tpak_pop_state()
+
+	elseif self:has_rumble_pak() then
+		print("Rumble pak inserted..")
+	elseif self:has_pak() then
+		print("Unknown pak inserted..")
+	else
+		print("No pak inserted..")
+	end
+
 	return true
 end
 

@@ -3,7 +3,7 @@ local progress = {
 }
 
 function progress.start()
-	progress.start_time = os.clock()
+	progress.start_time = os.clock() * 60
 end
 
 function progress.nice_size(size)
@@ -21,9 +21,15 @@ function progress.update(cur, max, width)
 	local bars		= string.rep("=", math.floor(perc*maxbars))
 	local spaces	= string.rep(" ", math.ceil((1-perc)*maxbars))
 
-	local elapsed	= os.clock() - progress.start_time
+	local elapsed	= (os.clock() * 60) - progress.start_time
 	local speed		= cur / elapsed
 	local estimate	= elapsed * max / cur
+
+	--[[print("clock", os.clock() * 60)
+	print("speed", speed)
+	print("elapsed", elapsed)
+	print("estimate", estimate)
+	print()]]
 
 	local percNum = math.floor(perc * 100)
 
